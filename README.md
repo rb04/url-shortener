@@ -1,5 +1,7 @@
 # URL Shortener
 
+[![CI](https://github.com/rb04/url-shortener/actions/workflows/ci.yml/badge.svg)](https://github.com/rb04/url-shortener/actions/workflows/ci.yml)
+
 A URL shortening service built with **FastAPI**, **PostgreSQL**, and **Redis**, using the
 **cache-aside** pattern so that repeat lookups of a short code skip the database entirely.
 
@@ -106,6 +108,24 @@ curl -i "http://localhost:8000/0eO9dHN"   # served from Postgres, then re-cached
 redis-cli get 0eO9dHN                     # => "https://example.com/hello"
 ```
 
+## Tests
+
+`main.py` opens its Postgres and Redis connections at import time, so the suite runs as
+integration tests against real services. That is deliberate: it means the tests verify the
+actual cache-aside behaviour, including what ends up in Redis, rather than asserting against
+mocks. Each test creates its own short code, so tests are independent and nothing already in
+the database or cache is touched.
+
+With Postgres and Redis running:
+
+```bash
+pip install -r requirements-dev.txt
+pytest -v
+```
+
+CI runs the same suite on Python 3.9 and 3.12 against `postgres:16` and `redis:7` service
+containers on every push and pull request — see [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
+
 ## Troubleshooting
 
 **Port 5432 already in use.** Another Postgres (for example one installed from the official
@@ -135,10 +155,14 @@ redis-server --port 6379 --dir /opt/homebrew/var/db/redis --daemonize yes
 ## Project layout
 
 ```
-main.py               FastAPI app: routes, Postgres + Redis wiring, table bootstrap
-docker-compose.yml    Postgres 16 and Redis 7 for local development
-requirements.txt      Python dependencies
-.env.example          Documented environment variables
+main.py                     FastAPI app: routes, Postgres + Redis wiring, table bootstrap
+tests/test_app.py           Integration tests covering both cache paths
+docker-compose.yml          Postgres 16 and Redis 7 for local development
+requirements.txt            Runtime dependencies
+requirements-dev.txt        Runtime dependencies plus the test tooling
+pytest.ini                  Pytest configuration
+.env.example                Documented environment variables
+.github/workflows/ci.yml    Test matrix run on every push and pull request
 ```
 
 ## Known limitations
@@ -150,4 +174,3 @@ Deliberately out of scope for this version, and the natural next steps:
 - **Short codes are not checked for collisions.** Codes are random, so an `INSERT` could in
   principle collide with an existing primary key and fail; a retry loop would handle it.
 - **URLs are not validated.** Any string is accepted and later used as a redirect target.
-- **No test suite yet.**
