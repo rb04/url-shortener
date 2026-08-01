@@ -9,9 +9,13 @@ Each test creates its own short code, so tests are independent and nothing
 existing in the database or cache is modified.
 """
 
+from concurrent.futures import ThreadPoolExecutor
+
+import psycopg2
 import pytest
 from fastapi.testclient import TestClient
 
+import main
 from main import CACHE, app
 
 EXAMPLE_URL = "https://example.com/some/page"
@@ -116,3 +120,92 @@ def test_docs_are_served(client):
     """The catch-all GET /{code} route must not shadow the API docs."""
     assert client.get("/docs").status_code == 200
     assert client.get("/openapi.json").status_code == 200
+
+
+# --- URL validation ---------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "javascript:alert(1)",
+        "file:///etc/passwd",
+        "ftp://example.com/x",
+        "not a url",
+        "example.com",  # no scheme
+        "https://",  # no host
+        "",
+    ],
+)
+def test_bad_urls_are_rejected(client, url):
+    assert client.post("/shorten", params={"url": url}).status_code == 422
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://example.com",
+        "https://example.com",
+        "https://example.com/path?query=1#frag",
+        "https://sub.example.co.uk:8443/deep/path",
+    ],
+)
+def test_good_urls_are_accepted(client, url):
+    assert client.post("/shorten", params={"url": url}).status_code == 200
+
+
+def test_the_stored_url_is_not_rewritten(client):
+    """Validation must not normalise the URL — the redirect has to be exact."""
+    url = "https://example.com/path?b=2&a=1"
+    code = shorten(client, url)
+
+    assert client.get(f"/{code}").headers["location"] == url
+
+
+# --- Short code collisions --------------------------------------------------
+
+
+def test_shorten_retries_when_a_code_collides(client, monkeypatch):
+    """Force make_code to hand back an already-used code, then a free one.
+
+    The replacement code is generated rather than hardcoded, so re-running the
+    suite against the same database cannot collide with a leftover row.
+    """
+    taken = shorten(client)
+    replacement = main.make_code()
+    monkeypatch.setattr(main, "make_code", iter([taken, replacement]).__next__)
+
+    assert shorten(client) == replacement
+
+
+def test_shorten_gives_up_after_too_many_collisions(client, monkeypatch):
+    taken = shorten(client)
+    monkeypatch.setattr(main, "make_code", lambda: taken)
+
+    assert client.post("/shorten", params={"url": EXAMPLE_URL}).status_code == 500
+
+
+# --- Connection pooling -----------------------------------------------------
+
+
+def test_a_failed_query_does_not_break_later_requests(client):
+    """Regression test for the single shared connection.
+
+    A query that errors used to leave the connection in an aborted transaction,
+    so every later request failed until the app restarted. db_cursor now rolls
+    back before returning the connection to the pool.
+    """
+    with pytest.raises(psycopg2.Error):
+        with main.db_cursor() as cur:
+            cur.execute("SELECT * FROM a_table_that_does_not_exist")
+
+    code = shorten(client)
+    assert client.get(f"/stats/{code}").status_code == 200
+
+
+def test_concurrent_requests_all_succeed(client):
+    """Sync endpoints run in FastAPI's threadpool, so these really do overlap."""
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        codes = list(pool.map(lambda _: shorten(client), range(24)))
+
+    assert len(set(codes)) == 24

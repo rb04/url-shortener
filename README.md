@@ -18,13 +18,23 @@ Redis is the read-through cache; Postgres is the source of truth. A code is writ
 at creation time, so even the *first* visit is a cache hit. On a cache miss the value is read
 from Postgres and backfilled into Redis with a 24-hour TTL.
 
+Postgres access goes through a `ThreadedConnectionPool`. FastAPI runs these synchronous
+endpoints in a threadpool, so requests genuinely overlap and a single shared connection would
+be contended. Every query is wrapped in a helper that commits on success and rolls back on
+failure — without the rollback, one failed query would leave its connection in an aborted
+transaction and break every later request that reused it.
+
 ## Endpoints
 
-| Method | Path            | Description                                  |
-| ------ | --------------- | -------------------------------------------- |
-| `POST` | `/shorten?url=` | Create a short code for `url`                |
-| `GET`  | `/{code}`       | Redirect to the original URL, count the click |
-| `GET`  | `/stats/{code}` | Return the original URL and click count      |
+| Method | Path            | Description                                   | Errors                          |
+| ------ | --------------- | --------------------------------------------- | ------------------------------- |
+| `POST` | `/shorten?url=` | Create a short code for `url`                 | `422` if `url` is not http(s)   |
+| `GET`  | `/{code}`       | Redirect to the original URL, count the click  | `404` if the code is unknown    |
+| `GET`  | `/stats/{code}` | Return the original URL and click count       | `404` if the code is unknown    |
+
+Only `http` and `https` URLs are accepted, so a short link cannot be pointed at a
+`javascript:` or `file:` target. Accepted URLs are stored byte-for-byte, without
+normalisation, so the redirect is always exactly what was submitted.
 
 Interactive API docs: <http://localhost:8000/docs>
 
@@ -155,8 +165,8 @@ redis-server --port 6379 --dir /opt/homebrew/var/db/redis --daemonize yes
 ## Project layout
 
 ```
-main.py                     FastAPI app: routes, Postgres + Redis wiring, table bootstrap
-tests/test_app.py           Integration tests covering both cache paths
+main.py                     FastAPI app: routes, connection pool, Redis wiring, table bootstrap
+tests/test_app.py           Integration tests covering both cache paths, pooling, and validation
 docker-compose.yml          Postgres 16 and Redis 7 for local development
 requirements.txt            Runtime dependencies
 requirements-dev.txt        Runtime dependencies plus the test tooling
@@ -169,8 +179,9 @@ pytest.ini                  Pytest configuration
 
 Deliberately out of scope for this version, and the natural next steps:
 
-- **One shared database connection.** `main.py` opens a single module-level `psycopg2`
-  connection, which is not suited to concurrent requests; a connection pool is the fix.
-- **Short codes are not checked for collisions.** Codes are random, so an `INSERT` could in
-  principle collide with an existing primary key and fail; a retry loop would handle it.
-- **URLs are not validated.** Any string is accepted and later used as a redirect target.
+- **No authentication or rate limiting.** Anyone who can reach the API can create
+  unlimited links.
+- **Every redirect writes to Postgres** to increment `click_count`, which makes the write
+  path the scaling bottleneck. Buffering counts in Redis and flushing them periodically
+  would trade exact accuracy for throughput.
+- **Links cannot be edited, deleted, or expired,** and there is no custom-alias support.
