@@ -81,7 +81,7 @@ def shorten(url: str):
         raise HTTPException(status_code=500, detail="Could not generate a unique short code")
 
     # Write to cache immediately so first visit is instant
-    CACHE.setex(code, CACHE_TTL, url)
+    CACHE.set(code, url, ex=CACHE_TTL)
     return {"short_url": f"{BASE_URL}/{code}"}
 
 @app.get("/stats/{code}")
@@ -115,6 +115,6 @@ def redirect(code: str):
         cur.execute("UPDATE urls SET click_count = click_count + 1 WHERE short_code = %s", (code,))
 
     # 3. Write back to cache so next visit is fast
-    CACHE.setex(code, CACHE_TTL, row[0])
+    CACHE.set(code, row[0], ex=CACHE_TTL)
 
     return RedirectResponse(url=row[0], status_code=302)
